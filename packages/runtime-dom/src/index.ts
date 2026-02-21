@@ -7,6 +7,7 @@ import {
   type ElementNamespace,
   type HydrationRenderer,
   type Renderer,
+  type RendererOptions,
   type RootHydrateFunction,
   type RootRenderFunction,
   compatUtils,
@@ -63,7 +64,8 @@ declare module '@vue/runtime-core' {
   }
 }
 
-const rendererOptions = /*@__PURE__*/ extend({ patchProp }, nodeOps)
+export const rendererOptions: RendererOptions<Node, Element> =
+  /*@__PURE__*/ extend({ patchProp }, nodeOps)
 
 // lazy create the renderer - this makes core renderer logic tree-shakable
 // in case the user only imports reactivity utilities from Vue.
