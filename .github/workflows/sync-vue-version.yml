@@ -1,0 +1,148 @@
+name: Sync Vue Version and Publish @vuact/runtime-dom
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      vue_version:
+        description: 'Vue version to sync (e.g., 3.4.0)'
+        required: false
+
+jobs:
+  sync-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+
+      - name: Get latest Vue version
+        id: vue_version
+        run: |
+          if [ "${{ github.event.inputs.vue_version }}" != "" ]; then
+            VUE_VERSION="${{ github.event.inputs.vue_version }}"
+          else
+            VUE_VERSION=$(curl -s https://registry.npmjs.org/vue/latest | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+          fi
+          echo "version=$VUE_VERSION" >> $GITHUB_OUTPUT
+          echo "Fetching Vue version: $VUE_VERSION"
+
+      - name: Create new branch for this version
+        run: |
+          BRANCH_NAME="release/v${{ steps.vue_version.outputs.version }}"
+          git checkout -b $BRANCH_NAME
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+        id: branch
+
+      - name: Cherry-pick second-to-last commit
+        run: |
+          COMMITS=$(git log --oneline -n 10)
+          echo "Recent commits:"
+          echo "$COMMITS"
+          
+          COMMIT_HASH=$(git rev-parse HEAD~1)
+          echo "Cherry-picking commit: $COMMIT_HASH"
+          git cherry-pick $COMMIT_HASH --no-commit || {
+            echo "Cherry-pick conflict detected, attempting to resolve..."
+            git checkout --theirs .
+            git add .
+            git cherry-pick --continue --no-commit || true
+          }
+
+      - name: Update package.json
+        run: |
+          cd packages/runtime-dom
+          
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          NEW_VERSION="${{ steps.vue_version.outputs.version }}"
+          
+          cat package.json | \
+            node -e "
+              const fs = require('fs');
+              let pkg = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+              pkg.version = '$NEW_VERSION';
+              pkg.name = '@vuact/runtime-dom';
+              pkg.dependencies = pkg.dependencies || {};
+              pkg.peerDependencies = pkg.peerDependencies || {};
+              
+              Object.keys(pkg.dependencies).forEach(dep => {
+                if (dep === 'vue' || dep.startsWith('@vue/')) {
+                  pkg.dependencies[dep] = '${{ steps.vue_version.outputs.version }}';
+                }
+              });
+              
+              Object.keys(pkg.peerDependencies).forEach(dep => {
+                if (dep === 'vue' || dep.startsWith('@vue/')) {
+                  pkg.peerDependencies[dep] = '${{ steps.vue_version.outputs.version }}';
+                }
+              });
+              
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            "
+          
+          echo "Updated package.json to version $NEW_VERSION with name @vuact/runtime-dom"
+
+      - name: Configure git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+      - name: Commit changes
+        run: |
+          git add packages/runtime-dom/package.json
+          git commit -m "chore: sync to Vue ${{ steps.vue_version.outputs.version }}"
+          
+          git push origin ${{ steps.branch.outputs.branch_name }} || {
+            echo "Branch already exists, force pushing..."
+            git push --force origin ${{ steps.branch.outputs.branch_name }}
+          }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@vuact'
+
+      - name: Install dependencies
+        run: |
+          cd packages/runtime-dom
+          npm install
+
+      - name: Build package
+        run: |
+          cd packages/runtime-dom
+          npm run build
+
+      - name: Publish to npm
+        run: |
+          cd packages/runtime-dom
+          npm publish --access public --tag latest
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create Pull Request
+        uses: actions/create-pull-request@v6
+        with:
+          title: "chore: sync with Vue ${{ steps.vue_version.outputs.version }}"
+          body: |
+            Synced with Vue ${{ steps.vue_version.outputs.version }}
+            
+            Changes:
+            - Created branch `release/v${{ steps.vue_version.outputs.version }}`
+            - Cherry-picked second-to-last commit
+            - Updated package name to `@vuact/runtime-dom`
+            - Updated Vue dependency version to `${{ steps.vue_version.outputs.version }}`
+            
+            Package published to npm: [@vuact/runtime-dom@${{ steps.vue_version.outputs.version }}](https://www.npmjs.com/package/@vuact/runtime-dom)
+          branch: ${{ steps.branch.outputs.branch_name }}
+          base: main
+          delete-branch: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
